@@ -18,6 +18,8 @@ tonsil = pd.read_parquet(r"E:\UIC_PHD\Matriviz_project\MatriViz-Data\tonsil_v1_s
 
 test_centroid = pd.read_parquet(r"E:\UIC_PHD\Azimuth_11072025\PBMC\Azimuth_PBMC_centroid.parquet")
 test_cortex = pd.read_parquet(r"E:\UIC_PHD\Azimuth_11072025\PBMC\Azimuth_PBMC_ADT_reference.parquet")
+pbmc_centroid = pd.read_parquet(r"E:\UIC_PHD\Azimuth_11072025\test\pbmc_centroid_v1.parquet")
+
 
 centroid = pd.read_parquet(r"E:\UIC_PHD\Matriviz_project\MatriViz-Data\cortex_centroid_v1.parquet")
 

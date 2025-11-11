@@ -21,24 +21,45 @@ class ConverterThread(QThread):
 
     def __init__(self, input_file, tissue, output_dir):
         super().__init__()
-        self.input_file = input_file
-        self.tissue = tissue
-        self.output_dir = output_dir
+        self.input_file = str(input_file)
+        self.tissue = str(tissue).strip()
+        self.output_dir = str(output_dir)
 
     def run(self):
         try:
             self.progress.emit("Loading data...")
             os.makedirs(self.output_dir, exist_ok=True)
+
+            # --- 支持 h5ad 和 h5/h5seurat ---
             if self.input_file.endswith(".h5ad"):
                 adata = ad.read_h5ad(self.input_file)
-            else:
-                raise ValueError("Supported input: .h5ad")
+            elif self.input_file.endswith(".h5") or self.input_file.endswith(".h5seurat"):
+                self.progress.emit("Converting .h5seurat → .h5ad ...")
+                temp_h5ad = os.path.join(self.output_dir, "temp_converted.h5ad")
 
-            # Extract expression
+                import subprocess
+                r_script = f"""
+                suppressMessages(library(SeuratDisk));
+                Convert("{self.input_file}", dest = "h5ad", overwrite = TRUE);
+                """
+                result = subprocess.run(["Rscript", "-e", r_script], capture_output=True, text=True)
+                if result.returncode != 0:
+                    raise RuntimeError(f"R conversion failed:\n{result.stderr}")
+
+                adata = ad.read_h5ad(temp_h5ad)
+            else:
+                raise ValueError("Supported input: .h5ad or .h5/.h5seurat")
+
+            print("=== AnnData loaded ===")
+            print(f"obs: {adata.obs_names.shape}, vars: {adata.var_names.shape}")
+
+            # --- Expression Matrix ---
+            self.progress.emit("Extracting expression matrix...")
             expr = adata.X.toarray() if not isinstance(adata.X, np.ndarray) else adata.X
             expr_df = pd.DataFrame(expr, index=adata.obs_names, columns=adata.var_names)
+            expr_df.columns = expr_df.columns.astype(str)
 
-            # UMAP
+            # --- UMAP Coordinates ---
             if "X_umap" not in adata.obsm:
                 raise ValueError("No UMAP coordinates found in object.")
             umap_df = pd.DataFrame(
@@ -46,22 +67,43 @@ class ConverterThread(QThread):
             )
             umap_df["index"] = umap_df.index
 
-            # Metadata
+            # --- Metadata ---
             meta_df = adata.obs.copy()
             meta_df["index"] = meta_df.index
             celltype_cols = [c for c in meta_df.columns if "celltype" in c.lower()]
             label_col = celltype_cols[-1] if celltype_cols else None
 
+            # --- Merge Expression + UMAP ---
             self.progress.emit("Merging data...")
             merged = umap_df.join(expr_df, how="inner")
-            merged["All_Genes"] = merged.iloc[:, 2:].mean(axis=1, skipna=True)
-            merged = merged.loc[:, ~merged.columns.str.contains("celltype", case=False)]
 
-            # Expression parquet
-            expr_filename = f"Azimuth_{self.tissue}_ADT_reference.parquet"
+            # Force numeric conversion to avoid float + str issues
+            numeric_part = merged.iloc[:, 2:].apply(pd.to_numeric, errors="coerce")
+            merged["All_Genes"] = numeric_part.mean(axis=1, skipna=True)
+
+            # Remove potential unwanted columns
+            merged = merged.loc[:, ~merged.columns.str.contains("celltype", case=False)]
+            merged.columns = merged.columns.astype(str)
+
+            # =============================
+            # 🔹 File Naming Convention
+            # =============================
+            base_name = str(self.tissue).lower().replace(" ", "_")
+            expr_filename = f"{base_name}_v1_ss.parquet"
+            centroid_filename = f"{base_name}_centroid_v1.parquet"
+            category_filename = f"{base_name}_v1_category.json"
+            overview_filename = f"{base_name}.json"
+
             expr_path = Path(self.output_dir) / expr_filename
+            centroid_path = Path(self.output_dir) / centroid_filename
+            category_path = Path(self.output_dir) / category_filename
+            overview_path = Path(self.output_dir) / overview_filename
+
+            # --- Write Expression Parquet ---
+            self.progress.emit("Writing expression parquet...")
             pq.write_table(pa.Table.from_pandas(merged.reset_index(drop=True)), expr_path, compression="zstd")
 
+            # --- Compute Centroids ---
             self.progress.emit("Computing centroids...")
             if label_col:
                 meta_sub = meta_df[[label_col, "index"]].merge(umap_df, on="index", how="left")
@@ -74,27 +116,40 @@ class ConverterThread(QThread):
             else:
                 centroids = pd.DataFrame(columns=["Type", "cen_x", "cen_y"])
 
-            centroid_filename = f"Azimuth_{self.tissue}_centroid.parquet"
-            centroid_path = Path(self.output_dir) / centroid_filename
             pq.write_table(pa.Table.from_pandas(centroids), centroid_path, compression="zstd")
 
-            self.progress.emit("Writing metadata JSON...")
-            meta_json = {
+            # --- Category JSON ---
+            self.progress.emit("Writing category JSON...")
+            category_json = {
                 "fileType": "matriviz",
                 "version": "1.1.0",
-                "category_name": self.tissue.lower(),
-                "category_description": self.tissue,
+                "category_name": base_name,
+                "category_description": str(self.tissue),
                 "parquet_file": expr_filename,
-                "category_file": f"{self.tissue.lower()}_category.json",
                 "centroid_file": centroid_filename
             }
-            json_path = Path(self.output_dir) / f"{self.tissue.lower()}_matriviz_meta.json"
-            with open(json_path, "w", encoding="utf-8") as f:
-                json.dump(meta_json, f, indent=4)
+            with open(category_path, "w", encoding="utf-8") as f:
+                json.dump(category_json, f, indent=4)
+
+            # --- Overview JSON ---
+            overview_json = {
+                "tissue": str(self.tissue),
+                "status": "converted",
+                "files": {
+                    "expression": expr_filename,
+                    "centroid": centroid_filename,
+                    "category": category_filename
+                }
+            }
+            with open(overview_path, "w", encoding="utf-8") as f:
+                json.dump(overview_json, f, indent=4)
 
             self.finished.emit(True, f"✅ Conversion completed!\n\nOutput: {self.output_dir}")
+
         except Exception as e:
-            self.finished.emit(False, f"❌ Error: {str(e)}")
+            import traceback
+            tb = traceback.format_exc()
+            self.finished.emit(False, f"❌ Error: {str(e)}\n\nTraceback:\n{tb}")
 
 
 # =========================
