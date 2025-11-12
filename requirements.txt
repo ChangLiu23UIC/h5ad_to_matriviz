@@ -1,0 +1,13 @@
+# Dependencies for h5ad to MatriViz parquet conversion
+
+# Core data processing
+numpy>=1.21.0
+pandas>=1.3.0
+pyarrow>=7.0.0
+anndata>=0.8.0
+
+# GUI dependencies (for file_to_parquet.py)
+PyQt6>=6.4.0
+
+# Optional: for h5seurat conversion (if needed)
+# rpy2>=3.5.0  # Requires R with SeuratDisk installed
