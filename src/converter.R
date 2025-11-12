@@ -295,7 +295,7 @@ convert_azimuth <- function(rds_path, tissue, output_dir, json_template = NULL) 
     cat("No cell type columns found - creating empty centroids file\n")
   }
   
-  write_parquet(centroids, centroid_file, compression = "zstd", version = "1.0")
+  write_parquet(centroids, centroid_file, compression = "snappy", version = "1.0")
   
   # --- Category JSON processing ---
   cat("Processing category JSON...\n")
