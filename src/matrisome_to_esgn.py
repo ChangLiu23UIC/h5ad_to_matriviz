@@ -1,5 +1,6 @@
 import json
 from mygene import MyGeneInfo
+import re
 
 # ========= Load your JSON =========
 with open("matrisome_list.json") as f:
@@ -32,6 +33,9 @@ for r in results:
             ens = val[0].get("gene")
         elif isinstance(val, dict):
             ens = val.get("gene")
+    if ens:
+        # ✅ Remove version suffix like ".17"
+        ens = re.sub(r"\.\d+$", "", ens)
     mapping[gene] = ens
 
 # ========= Recursively replace genes with ENSG =========
@@ -49,4 +53,4 @@ updated_data = replace_genes(data)
 with open("matrisome_list_ENSG.json", "w") as f:
     json.dump(updated_data, f, indent=2)
 
-print("✅ Saved: matrisome_list_ENSG.json")
+print("✅ Saved: matrisome_list_ENSG.json (version stripped)")

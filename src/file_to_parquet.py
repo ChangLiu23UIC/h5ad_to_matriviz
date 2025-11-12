@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QMessageBox, QProgressBar
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
+import re
 
 
 # =========================
@@ -125,8 +126,10 @@ class ConverterThread(QThread):
             if self.json_template and os.path.exists(self.json_template):
                 with open(self.json_template, "r", encoding="utf-8") as f:
                     template_json = json.load(f)
-                # Flatten nested structure for MatriViz compatibility
-                category_json = self._flatten_category_structure(template_json)
+                # Get available genes from H5AD file for filtering
+                available_genes = set(adata.var_names.astype(str))
+                # Flatten nested structure for MatriViz compatibility and filter genes
+                category_json = self._flatten_category_structure(template_json, available_genes)
             else:
                 category_json = {
                     "ECM Glycoproteins": [],
@@ -162,34 +165,95 @@ class ConverterThread(QThread):
             tb = traceback.format_exc()
             self.finished.emit(False, f"❌ Error: {str(e)}\n\nTraceback:\n{tb}")
 
-    def _flatten_category_structure(self, category_data):
+    def _flatten_category_structure(self, category_data, available_genes=None):
         """
         Flatten nested category structure to MatriViz-compatible format
+        and filter genes based on what's available in the H5AD file
+
+        Updated to:
+        - Match ENSG IDs ignoring version suffix
+        - Keep versioned ENSG IDs in the output
+        - Use only secondary-level categories as keys
 
         Args:
             category_data: Nested category structure
+            available_genes: Set of gene names available in the H5AD file (with version suffixes)
 
         Returns:
-            dict: Flattened structure with category_name -> [gene_list]
+            dict: Flattened structure with secondary_category -> [versioned_gene_list]
         """
         flattened = {}
 
-        def extract_categories(data, current_path=""):
+        # Create mapping from unversioned to versioned gene IDs
+        versioned_gene_map = {}
+        if available_genes:
+            for versioned_gene in available_genes:
+                # Remove version suffix to get base ENSG ID
+                base_gene = re.sub(r"\.\d+$", "", versioned_gene)
+                versioned_gene_map[base_gene] = versioned_gene
+
+        def extract_categories(data, current_category=""):
             if isinstance(data, dict):
                 for key, value in data.items():
-                    new_path = f"{current_path} - {key}" if current_path else key
-                    if isinstance(value, list):
-                        # Found a gene list - this is a category
-                        flattened[new_path] = value
+                    # Track the current category level
+                    if current_category == "":
+                        # First level - primary category (e.g., "Matrisome-associated")
+                        extract_categories(value, key)
+                    elif current_category != "" and isinstance(value, dict):
+                        # Second level - secondary category (e.g., "ECM-affiliated Proteins")
+                        # This is the level we want to use as keys
+                        extract_categories(value, key)
+                    elif isinstance(value, list):
+                        # Found a gene list - this is a subcategory
+                        if available_genes:
+                            # Filter genes to only include those available in H5AD
+                            # Match by base ENSG ID (without version)
+                            filtered_genes = []
+                            for base_gene in value:
+                                if base_gene in versioned_gene_map:
+                                    # Use the versioned gene ID from H5AD
+                                    filtered_genes.append(versioned_gene_map[base_gene])
+
+                            if filtered_genes:  # Only add category if it has genes
+                                # Use the secondary category as the key
+                                if current_category not in flattened:
+                                    flattened[current_category] = []
+                                flattened[current_category].extend(filtered_genes)
+                        else:
+                            # If no available_genes provided, include all genes
+                            if current_category not in flattened:
+                                flattened[current_category] = []
+                            flattened[current_category].extend(value)
                     else:
                         # Continue traversing nested structure
-                        extract_categories(value, new_path)
+                        extract_categories(value, current_category)
             elif isinstance(data, list):
-                # Direct gene list
-                if current_path:
-                    flattened[current_path] = data
+                # Direct gene list at current category level
+                if current_category:
+                    if available_genes:
+                        # Filter genes to only include those available in H5AD
+                        filtered_genes = []
+                        for base_gene in data:
+                            if base_gene in versioned_gene_map:
+                                # Use the versioned gene ID from H5AD
+                                filtered_genes.append(versioned_gene_map[base_gene])
+
+                        if filtered_genes:  # Only add category if it has genes
+                            if current_category not in flattened:
+                                flattened[current_category] = []
+                            flattened[current_category].extend(filtered_genes)
+                    else:
+                        # If no available_genes provided, include all genes
+                        if current_category not in flattened:
+                            flattened[current_category] = []
+                        flattened[current_category].extend(data)
 
         extract_categories(category_data)
+
+        # Remove duplicates from each category
+        for category in flattened:
+            flattened[category] = list(set(flattened[category]))
+
         return flattened
 
 
