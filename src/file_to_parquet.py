@@ -13,30 +13,30 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 
 # =========================
-# Worker Thread (Background Conversion)
+# Worker Thread
 # =========================
 class ConverterThread(QThread):
     progress = pyqtSignal(str)
     finished = pyqtSignal(bool, str)
 
-    def __init__(self, input_file, tissue, output_dir):
+    def __init__(self, input_file, tissue, output_dir, json_template=None):
         super().__init__()
         self.input_file = str(input_file)
         self.tissue = str(tissue).strip()
         self.output_dir = str(output_dir)
+        self.json_template = json_template
 
     def run(self):
         try:
             self.progress.emit("Loading data...")
             os.makedirs(self.output_dir, exist_ok=True)
 
-            # --- 支持 h5ad 和 h5/h5seurat ---
+            # --- Load or convert input ---
             if self.input_file.endswith(".h5ad"):
                 adata = ad.read_h5ad(self.input_file)
-            elif self.input_file.endswith(".h5") or self.input_file.endswith(".h5seurat"):
+            elif self.input_file.endswith((".h5", ".h5seurat")):
                 self.progress.emit("Converting .h5seurat → .h5ad ...")
                 temp_h5ad = os.path.join(self.output_dir, "temp_converted.h5ad")
-
                 import subprocess
                 r_script = f"""
                 suppressMessages(library(SeuratDisk));
@@ -45,27 +45,23 @@ class ConverterThread(QThread):
                 result = subprocess.run(["Rscript", "-e", r_script], capture_output=True, text=True)
                 if result.returncode != 0:
                     raise RuntimeError(f"R conversion failed:\n{result.stderr}")
-
                 adata = ad.read_h5ad(temp_h5ad)
             else:
                 raise ValueError("Supported input: .h5ad or .h5/.h5seurat")
 
-            print("=== AnnData loaded ===")
-            print(f"obs: {adata.obs_names.shape}, vars: {adata.var_names.shape}")
-
-            # --- Expression Matrix ---
+            # --- Expression matrix ---
             self.progress.emit("Extracting expression matrix...")
             expr = adata.X.toarray() if not isinstance(adata.X, np.ndarray) else adata.X
             expr_df = pd.DataFrame(expr, index=adata.obs_names, columns=adata.var_names)
             expr_df.columns = expr_df.columns.astype(str)
 
-            # --- UMAP Coordinates ---
+            # --- UMAP coordinates ---
             if "X_umap" not in adata.obsm:
                 raise ValueError("No UMAP coordinates found in object.")
             umap_df = pd.DataFrame(
-                adata.obsm["X_umap"], columns=["UMAP_1", "UMAP_2"], index=adata.obs_names
+                adata.obsm["X_umap"], columns=["umap_1", "umap_2"], index=adata.obs_names
             )
-            umap_df["index"] = umap_df.index
+            umap_df["index"] = umap_df.index.astype(str)
 
             # --- Metadata ---
             meta_df = adata.obs.copy()
@@ -73,23 +69,28 @@ class ConverterThread(QThread):
             celltype_cols = [c for c in meta_df.columns if "celltype" in c.lower()]
             label_col = celltype_cols[-1] if celltype_cols else None
 
-            # --- Merge Expression + UMAP ---
+            # --- Merge expression + UMAP ---
             self.progress.emit("Merging data...")
             merged = umap_df.join(expr_df, how="inner")
-
-            # Force numeric conversion to avoid float + str issues
-            numeric_part = merged.iloc[:, 2:].apply(pd.to_numeric, errors="coerce")
-            merged["All_Genes"] = numeric_part.mean(axis=1, skipna=True)
-
-            # Remove potential unwanted columns
+            # Remove any metadata columns that might interfere with gene selection
             merged = merged.loc[:, ~merged.columns.str.contains("celltype", case=False)]
             merged.columns = merged.columns.astype(str)
 
+            # Ensure index column is first and properly formatted
+            merged = merged.reset_index(drop=False)
+            merged = merged.rename(columns={'index': 'original_index'})
+            merged['index'] = merged['original_index'].astype(str)
+            merged = merged.drop('original_index', axis=1)
+
+            # Reorder columns to put index first
+            cols = ['index', 'umap_1', 'umap_2'] + [col for col in merged.columns if col not in ['index', 'umap_1', 'umap_2']]
+            merged = merged[cols]
+
             # =============================
-            # 🔹 File Naming Convention
+            # 🔹 File naming
             # =============================
             base_name = str(self.tissue).lower().replace(" ", "_")
-            expr_filename = f"{base_name}_v1_ss.parquet"
+            expr_filename = f"{base_name}_v1.parquet"
             centroid_filename = f"{base_name}_centroid_v1.parquet"
             category_filename = f"{base_name}_v1_category.json"
             overview_filename = f"{base_name}.json"
@@ -99,48 +100,58 @@ class ConverterThread(QThread):
             category_path = Path(self.output_dir) / category_filename
             overview_path = Path(self.output_dir) / overview_filename
 
-            # --- Write Expression Parquet ---
+            # --- Write expression parquet ---
             self.progress.emit("Writing expression parquet...")
-            pq.write_table(pa.Table.from_pandas(merged.reset_index(drop=True)), expr_path, compression="zstd")
+            # Ensure index column is preserved as string type
+            merged['index'] = merged['index'].astype(str)
+            pq.write_table(pa.Table.from_pandas(merged), expr_path, compression="zstd")
 
-            # --- Compute Centroids ---
+            # --- Compute centroids ---
             self.progress.emit("Computing centroids...")
             if label_col:
                 meta_sub = meta_df[[label_col, "index"]].merge(umap_df, on="index", how="left")
                 centroids = (
-                    meta_sub.groupby(label_col)[["UMAP_1", "UMAP_2"]]
+                    meta_sub.groupby(label_col)[["umap_1", "umap_2"]]
                     .median()
                     .reset_index()
-                    .rename(columns={label_col: "Type", "UMAP_1": "cen_x", "UMAP_2": "cen_y"})
+                    .rename(columns={label_col: "Type", "umap_1": "cen_x", "umap_2": "cen_y"})
                 )
             else:
                 centroids = pd.DataFrame(columns=["Type", "cen_x", "cen_y"])
-
             pq.write_table(pa.Table.from_pandas(centroids), centroid_path, compression="zstd")
 
-            # --- Category JSON ---
+            # --- Category JSON (flattened for MatriViz) ---
             self.progress.emit("Writing category JSON...")
-            category_json = {
-                "fileType": "matriviz",
-                "version": "1.1.0",
-                "category_name": base_name,
-                "category_description": str(self.tissue),
-                "parquet_file": expr_filename,
-                "centroid_file": centroid_filename
-            }
+            if self.json_template and os.path.exists(self.json_template):
+                with open(self.json_template, "r", encoding="utf-8") as f:
+                    template_json = json.load(f)
+                # Flatten nested structure for MatriViz compatibility
+                category_json = self._flatten_category_structure(template_json)
+            else:
+                category_json = {
+                    "ECM Glycoproteins": [],
+                    "Secreted Factors": [],
+                    "Collagens": [],
+                    "ECM Regulators": [],
+                    "Proteoglycans": [],
+                    "ECM-affiliated Proteins": []
+                }
+
             with open(category_path, "w", encoding="utf-8") as f:
                 json.dump(category_json, f, indent=4)
 
             # --- Overview JSON ---
+            self.progress.emit("Writing overview JSON...")
             overview_json = {
-                "tissue": str(self.tissue),
-                "status": "converted",
-                "files": {
-                    "expression": expr_filename,
-                    "centroid": centroid_filename,
-                    "category": category_filename
-                }
+                "fileType": "matriviz",
+                "version": "0.0.1",
+                "category_name": base_name,
+                "category_description": str(self.tissue),
+                "parquet_file": expr_filename,
+                "category_file": category_filename,
+                "centroid_file": centroid_filename
             }
+
             with open(overview_path, "w", encoding="utf-8") as f:
                 json.dump(overview_json, f, indent=4)
 
@@ -151,15 +162,45 @@ class ConverterThread(QThread):
             tb = traceback.format_exc()
             self.finished.emit(False, f"❌ Error: {str(e)}\n\nTraceback:\n{tb}")
 
+    def _flatten_category_structure(self, category_data):
+        """
+        Flatten nested category structure to MatriViz-compatible format
+
+        Args:
+            category_data: Nested category structure
+
+        Returns:
+            dict: Flattened structure with category_name -> [gene_list]
+        """
+        flattened = {}
+
+        def extract_categories(data, current_path=""):
+            if isinstance(data, dict):
+                for key, value in data.items():
+                    new_path = f"{current_path} - {key}" if current_path else key
+                    if isinstance(value, list):
+                        # Found a gene list - this is a category
+                        flattened[new_path] = value
+                    else:
+                        # Continue traversing nested structure
+                        extract_categories(value, new_path)
+            elif isinstance(data, list):
+                # Direct gene list
+                if current_path:
+                    flattened[current_path] = data
+
+        extract_categories(category_data)
+        return flattened
+
 
 # =========================
-# Main GUI Window
+# GUI
 # =========================
 class AzimuthApp(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Azimuth → MatriViz Converter")
-        self.setFixedSize(480, 300)
+        self.setFixedSize(480, 380)
 
         layout = QVBoxLayout()
 
@@ -172,7 +213,7 @@ class AzimuthApp(QWidget):
         hl1.addWidget(self.input_line)
         hl1.addWidget(self.input_btn)
 
-        # Tissue name
+        # Tissue
         self.tissue_label = QLabel("Tissue name:")
         self.tissue_line = QLineEdit()
 
@@ -185,12 +226,19 @@ class AzimuthApp(QWidget):
         hl2.addWidget(self.output_line)
         hl2.addWidget(self.output_btn)
 
-        # Progress bar
+        # JSON template
+        self.json_label = QLabel("Category JSON template (optional):")
+        self.json_line = QLineEdit()
+        self.json_btn = QPushButton("Browse")
+        self.json_btn.clicked.connect(self.select_json)
+        hl3 = QHBoxLayout()
+        hl3.addWidget(self.json_line)
+        hl3.addWidget(self.json_btn)
+
+        # Progress bar + convert button
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setVisible(False)
-
-        # Convert button
         self.convert_btn = QPushButton("Convert")
         self.convert_btn.clicked.connect(self.start_conversion)
 
@@ -200,12 +248,14 @@ class AzimuthApp(QWidget):
         layout.addWidget(self.tissue_line)
         layout.addWidget(self.output_label)
         layout.addLayout(hl2)
+        layout.addWidget(self.json_label)
+        layout.addLayout(hl3)
         layout.addWidget(self.convert_btn)
         layout.addWidget(self.progress_bar)
         self.setLayout(layout)
 
     def select_input(self):
-        file, _ = QFileDialog.getOpenFileName(self, "Select .h5ad File", "", "H5AD files (*.h5ad)")
+        file, _ = QFileDialog.getOpenFileName(self, "Select Input File", "", "H5AD/H5Seurat files (*.h5ad *.h5 *.h5seurat)")
         if file:
             self.input_line.setText(file)
 
@@ -214,19 +264,25 @@ class AzimuthApp(QWidget):
         if folder:
             self.output_line.setText(folder)
 
+    def select_json(self):
+        file, _ = QFileDialog.getOpenFileName(self, "Select Category JSON Template", "", "JSON files (*.json)")
+        if file:
+            self.json_line.setText(file)
+
     def start_conversion(self):
         input_file = self.input_line.text().strip()
         tissue = self.tissue_line.text().strip()
         output_dir = self.output_line.text().strip()
+        json_template = self.json_line.text().strip() or None
 
         if not all([input_file, tissue, output_dir]):
-            QMessageBox.warning(self, "Missing Info", "Please fill all fields.")
+            QMessageBox.warning(self, "Missing Info", "Please fill all required fields.")
             return
 
         self.convert_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
 
-        self.worker = ConverterThread(input_file, tissue, output_dir)
+        self.worker = ConverterThread(input_file, tissue, output_dir, json_template)
         self.worker.progress.connect(self.show_progress)
         self.worker.finished.connect(self.finish_conversion)
         self.worker.start()
@@ -241,7 +297,7 @@ class AzimuthApp(QWidget):
 
 
 # =========================
-# Run App
+# Run
 # =========================
 if __name__ == "__main__":
     app = QApplication(sys.argv)
