@@ -56,6 +56,13 @@ class ConverterThread(QThread):
             expr_df = pd.DataFrame(expr, index=adata.obs_names, columns=adata.var_names)
             expr_df.columns = expr_df.columns.astype(str)
 
+            # --- Add All_Genes pseudo-gene ---
+            self.progress.emit("Calculating All_Genes average expression...")
+            # Calculate mean expression across all genes for each cell
+            all_genes_mean = expr_df.mean(axis=1)
+            # Add as a new column to the expression dataframe
+            expr_df["All_Genes"] = all_genes_mean
+
             # --- UMAP coordinates ---
             if "X_umap" not in adata.obsm:
                 raise ValueError("No UMAP coordinates found in object.")
