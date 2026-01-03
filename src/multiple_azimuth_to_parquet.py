@@ -130,10 +130,10 @@ class ConverterThread(QThread):
 
         # Centroids (Based on predicted_label)
         centroids = (
-            merged.groupby("predicted_label")[["umap_1", "umap_2"]]
+            merged.groupby("azimuth_label")[["umap_1", "umap_2"]]
             .median()
             .reset_index()
-            .rename(columns={"predicted_label": "Type", "umap_1": "cen_x", "umap_2": "cen_y"})
+            .rename(columns={"azimuth_label": "Type", "umap_1": "cen_x", "umap_2": "cen_y"})
         )
         pq.write_table(pa.Table.from_pandas(centroids), centroid_path, compression="zstd")
 
