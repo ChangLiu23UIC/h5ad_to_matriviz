@@ -68,7 +68,7 @@ class ConverterThread(QThread):
         adata = ad.read_h5ad(input_file)
 
         # CHECK REQUIREMENTS: Must have X_umap_proj and specific metadata
-        required_obs = ['azimuth_label', 'predicted_label']
+        required_obs = ['azimuth_label']
         has_umap_proj = "X_umap_proj" in adata.obsm
         has_metadata = all(col in adata.obs.columns for col in required_obs)
 
@@ -92,7 +92,7 @@ class ConverterThread(QThread):
         )
 
         # --- Metadata (Extract azimuth_label and predicted_label) ---
-        meta_df = adata.obs[['azimuth_label', 'predicted_label']].copy()
+        meta_df = adata.obs[['azimuth_label']].copy()
         meta_df["index"] = meta_df.index.astype(str)
 
         # --- Merge ---
@@ -101,7 +101,7 @@ class ConverterThread(QThread):
         merged = merged.reset_index().rename(columns={"index": "index"})
 
         # Ensure 'index', 'umap_1', 'umap_2' are at the front
-        cols = ["index", "umap_1", "umap_2", "azimuth_label", "predicted_label"]
+        cols = ["index", "umap_1", "umap_2", "azimuth_label"]
         other_cols = [c for c in merged.columns if c not in cols]
         merged = merged[cols + other_cols]
 
