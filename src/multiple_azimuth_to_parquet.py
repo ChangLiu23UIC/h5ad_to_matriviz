@@ -135,6 +135,7 @@ class ConverterThread(QThread):
             .reset_index()
             .rename(columns={"azimuth_label": "Type", "umap_1": "cen_x", "umap_2": "cen_y"})
         )
+        centroids = centroids.dropna(subset=["cen_x", "cen_y"])
         pq.write_table(pa.Table.from_pandas(centroids), centroid_path, compression="zstd")
 
         # Category JSON (Top 200 genes)
