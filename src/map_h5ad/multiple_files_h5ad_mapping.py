@@ -1,59 +1,64 @@
 import scanpy as sc
 import os
 import glob
-from tqdm import tqdm  # 导入进度条库
+import numpy as np  # 用于设置全局种子
+from tqdm import tqdm
 
 # --- 配置路径 ---
 ref_path = r"E:\UIC_PHD\Python_projects\parquet_read\src\map_h5ad\refs\bladder_ref.h5ad"
-input_dir = r"G:\Secondary_analysis\Organized_by_Tissue\Bladder"
-output_dir = r"F:\12_30_2025_test_azimuth_annotation\bladder_mapped"
+input_dir = r"F:\12_30_2025_test_azimuth_annotation"
+output_dir = r"E:\UIC_PHD\PythonProject\12-4-2025-Matriviz\raw\Mapped_bladder_h5ad"
+
+# 设置全局随机种子（双重保险）
+SEED = 42
+np.random.seed(SEED)
 
 if not os.path.exists(output_dir):
     os.makedirs(output_dir)
 
 # --- 1. 准备 Reference 数据 ---
 print("Loading reference data...")
-ref_data = sc.read_h5ad(ref_path)
-ref_data.var_names = ref_data.var_names.str.split('.').str[0]
+ref_raw = sc.read_h5ad(ref_path)
+ref_raw.var_names = ref_raw.var_names.str.split('.').str[0]
 
 # --- 2. 获取文件列表 ---
 query_files = glob.glob(os.path.join(input_dir, "*.h5ad"))
-
-# --- 3. 使用 tqdm 遍历 ---
-# desc 是进度条前的描述文字，unit 是单位
 pbar = tqdm(query_files, desc="Processing Samples", unit="sample")
 
 for query_path in pbar:
     file_name = os.path.basename(query_path)
-
-    # 实时更新进度条左侧的文字，显示当前处理的文件
     pbar.set_description(f"Processing: {file_name}")
-
     save_path = os.path.join(output_dir, file_name)
 
     try:
         adata = sc.read_h5ad(query_path)
         adata.var_names = adata.var_names.str.split('.').str[0]
 
-        common_genes = adata.var_names.intersection(ref_data.var_names)
+        # 1. 找出共同基因
+        common_genes = ref_raw.var_names.intersection(adata.var_names)
+
+        # 2. 提取子集
+        ref_sub = ref_raw[:, common_genes].copy()
         adata_sub = adata[:, common_genes].copy()
-        ref_sub = ref_data[:, common_genes].copy()
-        adata_sub = adata_sub[:, ref_sub.var_names].copy()
 
-        # 计算
-        sc.pp.pca(ref_sub)
-        sc.pp.neighbors(ref_sub, n_neighbors=14, use_rep='X_pca')
-        sc.tl.umap(ref_sub, random_state=42)
+        # 3. 对针对该样本的 ref_sub 进行快速预处理
+        # 在 PCA 和 UMAP 中显式设置 random_state
+        sc.pp.pca(ref_sub, random_state=SEED)
+        sc.pp.neighbors(ref_sub, n_neighbors=14, random_state=SEED)
+        sc.tl.umap(ref_sub, random_state=SEED)
 
+        # 4. 映射
+        # ingest 内部会继承 ref_sub 的布局信息
         sc.tl.ingest(adata_sub, ref_sub, obs='cell_type')
 
+        # 5. 整理元数据
         adata_sub.obs['azimuth_label'] = adata_sub.obs['cell_type']
         adata_sub.obsm['X_umap_proj'] = adata_sub.obsm['X_umap']
 
-
+        # 6. 保存
+        adata_sub.write(save_path)
 
     except Exception as e:
-        # 使用 tqdm.write 可以在不破坏进度条的情况下打印错误信息
         tqdm.write(f"Error processing {file_name}: {e}")
 
-print("\nAll tasks completed!")
+print("\nAll tasks completed! Random state fixed at 42.")
