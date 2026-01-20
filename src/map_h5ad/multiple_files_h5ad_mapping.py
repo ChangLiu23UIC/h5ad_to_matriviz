@@ -7,9 +7,9 @@ from scipy.sparse import csr_matrix
 from tqdm import tqdm
 
 # --- 配置路径 ---
-ref_path = r"E:\UIC_PHD\Python_projects\parquet_read\src\map_h5ad\refs\lymph_node_ref.h5ad"
+ref_path = r"E:\UIC_PHD\Python_projects\parquet_read\src\map_h5ad\refs\knee_ref.h5ad"
 input_dir = r"F:\12_30_2025_test_azimuth_annotation"
-output_dir = r"E:\UIC_PHD\PythonProject\12-4-2025-Matriviz\raw\Mapped_lymph_node_h5ad"
+output_dir = r"E:\UIC_PHD\PythonProject\12-4-2025-Matriviz\raw\Mapped_knee_h5ad"
 
 # 设置全局随机种子
 SEED = 42
