@@ -7,9 +7,9 @@ from scipy.sparse import csr_matrix
 from tqdm import tqdm
 
 # --- 配置路径 ---
-ref_path = r"E:\UIC_PHD\Python_projects\parquet_read\src\map_h5ad\refs\knee_ref.h5ad"
-input_dir = r"F:\12_30_2025_test_azimuth_annotation"
-output_dir = r"E:\UIC_PHD\PythonProject\12-4-2025-Matriviz\raw\Mapped_knee_h5ad"
+ref_path = r"F:\12_30_2025_test_azimuth_annotation\ref\lung_ref.h5ad"
+input_dir = r"G:\Secondary_analysis\Organized_by_Tissue\Lung"
+output_dir = r"F:\12_30_2025_test_azimuth_annotation\lung"
 
 # 设置全局随机种子
 SEED = 42
@@ -26,9 +26,9 @@ ref_raw.var_names = ref_raw.var_names.str.split('.').str[0]
 
 # 预处理 Reference：确保其具有 PCA 和 Neighbors 布局
 # ingest 需要参考集已经完成了这些步骤
-sc.pp.pca(ref_raw, random_state=SEED)
-sc.pp.neighbors(ref_raw, n_neighbors=14, random_state=SEED)
-sc.tl.umap(ref_raw, random_state=SEED)
+# sc.pp.pca(ref_raw, random_state=SEED)
+# sc.pp.neighbors(ref_raw, n_neighbors=14, random_state=SEED)
+# sc.tl.umap(ref_raw, random_state=SEED)
 
 # --- 2. 获取文件列表 ---
 query_files = glob.glob(os.path.join(input_dir, "*.h5ad"))
